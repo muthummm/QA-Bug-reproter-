@@ -301,7 +301,7 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
 
   return (
     <>
-      <div className="dlg-head"><span className="key">{b.key}</span><h2 id="view-title">{b.description}</h2>
+      <div className="dlg-head"><h2 id="view-title">{b.key}</h2>
         <button className="x" onClick={onClose} aria-label="Close">×</button></div>
       <div className="dlg-body">
         <div className="statusbox">
@@ -318,17 +318,15 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
             <button className="btn" disabled={busy || !comment.trim()} onClick={() => updateStatus(b.status)}>Add comment</button>
           </div>
           {actions.length > 0 && <span className="hint">A typed comment is saved together with the next step you click.</span>}
-          <details className="other">
-            <summary>Set another status</summary>
-            <div className="sb-line">
-              <select id="v-status" value={status} onChange={e => setStatus(e.target.value)} aria-label="New status">
-                {STATUSES.filter(s => tester || DEV_STATUSES.includes(s) || s === b.status).map(s =>
-                  <option key={s} disabled={!tester && !DEV_STATUSES.includes(s)}>{s}</option>)}
-              </select>
-              <button className="btn" disabled={busy || status === b.status} onClick={() => updateStatus()}>Set status</button>
-            </div>
-            {!tester && <span className="hint">Closing or reopening is done by the tester after they retest your fix.</span>}
-          </details>
+          <div className="sb-line">
+            <label htmlFor="v-status"><strong>Change status</strong></label>
+            <select id="v-status" value={status} onChange={e => setStatus(e.target.value)}>
+              {STATUSES.filter(s => tester || DEV_STATUSES.includes(s) || s === b.status).map(s =>
+                <option key={s} disabled={!tester && !DEV_STATUSES.includes(s)}>{s}</option>)}
+            </select>
+            <button className="btn primary" disabled={busy || status === b.status} onClick={() => updateStatus()}>Update status</button>
+          </div>
+          {!tester && <span className="hint">Closing or reopening is done by the tester after they retest your fix.</span>}
         </div>
 
         <dl className="meta">
