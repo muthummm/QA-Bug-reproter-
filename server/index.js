@@ -3,7 +3,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
-import { db, UPLOAD_DIR } from './db.js';
+import { db, UPLOAD_DIR, isMember, addMember } from './db.js';
 import { STATUSES, PRIORITIES, ROLES, DEV_STATUSES, importCsv } from './importer.js';
 
 const app = express();
@@ -54,7 +54,21 @@ const BUG_SELECT = `
   LEFT JOIN users r ON r.id = b.reporter_id`;
 const shapeBug = b => b && { ...b, key: bugKey(b.id) };
 
-function readBugBody(body) {
+// Projects (and their bugs) exist only for members. Non-members get the same 404 as a missing
+// project, so a developer can't even tell that a project they weren't added to exists.
+const NO_PROJECT = 'Project not found, or you have not been added to it.';
+function memberProject(req, res, id) {
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(Number(id));
+  if (!project || !isMember(project.id, req.user.id)) { res.status(404).json({ error: NO_PROJECT }); return null; }
+  return project;
+}
+function memberBug(req, res) {
+  const bug = db.prepare('SELECT * FROM bugs WHERE id = ?').get(Number(req.params.id));
+  if (!bug || !isMember(bug.project_id, req.user.id)) { res.status(404).json({ error: 'Bug not found.' }); return null; }
+  return bug;
+}
+
+function readBugBody(body, projectId) {
   const bug = {
     panel: str(body.panel, 100),
     module: str(body.module, 200),
@@ -75,8 +89,8 @@ function readBugBody(body) {
   const latestToday = new Date(Date.now() + 14 * 3600 * 1000).toISOString().slice(0, 10);
   if (bug.date_reported > latestToday) return { error: 'Date reported cannot be in the future.' };
   if (bug.link && !/^https?:\/\//i.test(bug.link)) return { error: 'Screenshot/Link must start with http:// or https://' };
-  if (bug.assignee_id && !db.prepare('SELECT 1 FROM users WHERE id = ?').get(bug.assignee_id))
-    return { error: 'That assignee does not exist.' };
+  if (bug.assignee_id && !isMember(projectId, bug.assignee_id))
+    return { error: 'The assignee must be a member of this project. Add them in Team first.' };
   return { bug };
 }
 
@@ -119,35 +133,79 @@ app.post('/api/auth/logout', auth, (req, res) => {
 
 app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user) }));
 
-app.get('/api/users', auth, (_req, res) => {
+// Everyone with an account; testers use it to pick who to add to a project.
+app.get('/api/users', auth, testerOnly, (_req, res) => {
   res.json(db.prepare('SELECT id, name, username, role FROM users ORDER BY role DESC, name').all());
 });
 
 app.get('/api/meta', (_req, res) => res.json({ statuses: STATUSES, priorities: PRIORITIES, devStatuses: DEV_STATUSES }));
 
 // ---------- project routes ----------
-app.get('/api/projects', auth, (_req, res) => {
+// Only the projects this person is a member of
+app.get('/api/projects', auth, (req, res) => {
   res.json(db.prepare(`
     SELECT p.id, p.name, p.description, p.created_at,
+      (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) AS members,
       COUNT(b.id) AS total,
       SUM(CASE WHEN b.status IN ('Open','Reopened','In Progress') THEN 1 ELSE 0 END) AS active,
       SUM(CASE WHEN b.status = 'Ready for Retest' OR b.status = 'Fixed' THEN 1 ELSE 0 END) AS to_verify,
+      SUM(CASE WHEN b.assignee_id = ? AND b.status IN ('Open','Reopened','In Progress') THEN 1 ELSE 0 END) AS mine,
       MAX(b.updated_at) AS last_activity
-    FROM projects p LEFT JOIN bugs b ON b.project_id = p.id
-    GROUP BY p.id ORDER BY COALESCE(MAX(b.updated_at), p.created_at) DESC`).all());
+    FROM projects p
+    JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = ?
+    LEFT JOIN bugs b ON b.project_id = p.id
+    GROUP BY p.id ORDER BY COALESCE(MAX(b.updated_at), p.created_at) DESC`).all(req.user.id, req.user.id));
 });
 
-app.post('/api/projects', auth, (req, res) => {
+app.post('/api/projects', auth, testerOnly, (req, res) => {
   const name = str(req.body.name, 120), description = str(req.body.description, 500);
   if (!name) return res.status(400).json({ error: 'Give the project a name.' });
   if (db.prepare('SELECT 1 FROM projects WHERE name = ?').get(name)) return res.status(409).json({ error: 'A project with that name already exists.' });
   const id = db.prepare('INSERT INTO projects (name, description, created_by) VALUES (?, ?, ?)').run(name, description, req.user.id).lastInsertRowid;
+  addMember(id, req.user.id, req.user.id);
   res.status(201).json({ project: db.prepare('SELECT * FROM projects WHERE id = ?').get(id) });
 });
 
-app.put('/api/projects/:id', auth, (req, res) => {
-  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(Number(req.params.id));
-  if (!p) return res.status(404).json({ error: 'Project not found.' });
+// ---------- project members ("Team") ----------
+const listMembers = projectId => db.prepare(`
+  SELECT u.id, u.name, u.username, u.role, u.password_hash = '' AS pending, pm.added_at, a.name AS added_by_name
+  FROM project_members pm JOIN users u ON u.id = pm.user_id LEFT JOIN users a ON a.id = pm.added_by
+  WHERE pm.project_id = ? ORDER BY u.role DESC, u.name`).all(projectId);
+
+app.get('/api/projects/:id/members', auth, (req, res) => {
+  const p = memberProject(req, res, req.params.id);
+  if (p) res.json(listMembers(p.id));
+});
+
+app.post('/api/projects/:id/members', auth, testerOnly, (req, res) => {
+  const p = memberProject(req, res, req.params.id);
+  if (!p) return;
+  const user = Number(req.body.user_id) > 0
+    ? db.prepare('SELECT * FROM users WHERE id = ?').get(Number(req.body.user_id))
+    : db.prepare('SELECT * FROM users WHERE username = ?').get(str(req.body.username, 40));
+  if (!user) return res.status(404).json({ error: 'No account with that username. Ask them to create an account first.' });
+  if (isMember(p.id, user.id)) return res.status(409).json({ error: `${user.name} is already in this project.` });
+  addMember(p.id, user.id, req.user.id);
+  res.status(201).json({ added: publicUser(user), members: listMembers(p.id) });
+});
+
+app.delete('/api/projects/:id/members/:userId', auth, testerOnly, (req, res) => {
+  const p = memberProject(req, res, req.params.id);
+  if (!p) return;
+  const userId = Number(req.params.userId);
+  if (!isMember(p.id, userId)) return res.status(404).json({ error: 'That person is not in this project.' });
+  const testersLeft = db.prepare(`SELECT COUNT(*) AS n FROM project_members pm JOIN users u ON u.id = pm.user_id
+    WHERE pm.project_id = ? AND u.role = 'Tester' AND u.id != ?`).get(p.id, userId).n;
+  if (testersLeft === 0) return res.status(400).json({ error: 'A project needs at least one tester. Add another tester before removing this one.' });
+  db.prepare('DELETE FROM project_members WHERE project_id = ? AND user_id = ?').run(p.id, userId);
+  // Their open bugs in this project become unassigned so nothing is stuck with someone who can't see it
+  const unassigned = db.prepare('UPDATE bugs SET assignee_id = NULL WHERE project_id = ? AND assignee_id = ?').run(p.id, userId).changes;
+  res.json({ ok: true, unassigned, members: listMembers(p.id) });
+});
+
+app.put('/api/projects/:id', auth, testerOnly, (req, res) => {
+  const p = memberProject(req, res, req.params.id);
+  if (!p) return;
   const name = str(req.body.name, 120) || p.name;
   if (name.toLowerCase() !== p.name.toLowerCase() && db.prepare('SELECT 1 FROM projects WHERE name = ?').get(name))
     return res.status(409).json({ error: 'A project with that name already exists.' });
@@ -155,21 +213,19 @@ app.put('/api/projects/:id', auth, (req, res) => {
   res.json({ project: db.prepare('SELECT * FROM projects WHERE id = ?').get(p.id) });
 });
 
-app.delete('/api/projects/:id', auth, (req, res) => {
-  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(Number(req.params.id));
-  if (!p) return res.status(404).json({ error: 'Project not found.' });
+app.delete('/api/projects/:id', auth, testerOnly, (req, res) => {
+  const p = memberProject(req, res, req.params.id);
+  if (!p) return;
   if (db.prepare('SELECT COUNT(*) AS n FROM bugs WHERE project_id = ?').get(p.id).n > 0)
     return res.status(400).json({ error: 'Only empty projects can be deleted.' });
   db.prepare('DELETE FROM projects WHERE id = ?').run(p.id);
   res.json({ ok: true });
 });
 
-const projectFrom = v => db.prepare('SELECT * FROM projects WHERE id = ?').get(Number(v));
-
 // ---------- bug routes ----------
 app.get('/api/bugs', auth, (req, res) => {
-  const project = projectFrom(req.query.project);
-  if (!project) return res.status(400).json({ error: 'Pick a project first.' });
+  const project = memberProject(req, res, req.query.project);
+  if (!project) return;
   const where = ['b.project_id = ?'], args = [project.id];
   if (STATUSES.includes(req.query.status)) { where.push('b.status = ?'); args.push(req.query.status); }
   if (req.query.panel) { where.push('b.panel = ?'); args.push(str(req.query.panel, 100)); }
@@ -197,8 +253,8 @@ app.get('/api/bugs', auth, (req, res) => {
 });
 
 app.get('/api/bugs/:id', auth, (req, res) => {
+  if (!memberBug(req, res)) return;
   const bug = db.prepare(`${BUG_SELECT} WHERE b.id = ?`).get(Number(req.params.id));
-  if (!bug) return res.status(404).json({ error: 'Bug not found.' });
   const history = db.prepare(`
     SELECT h.*, u.name AS user_name, u.role AS user_role FROM history h
     LEFT JOIN users u ON u.id = h.user_id WHERE h.bug_id = ? ORDER BY h.id DESC`).all(bug.id);
@@ -206,9 +262,9 @@ app.get('/api/bugs/:id', auth, (req, res) => {
 });
 
 app.post('/api/bugs', auth, testerOnly, (req, res) => {
-  const project = projectFrom(req.body.project_id);
-  if (!project) return res.status(400).json({ error: 'Pick a project first.' });
-  const { bug, error } = readBugBody(req.body);
+  const project = memberProject(req, res, req.body.project_id);
+  if (!project) return;
+  const { bug, error } = readBugBody(req.body, project.id);
   if (error) return res.status(400).json({ error });
   const t = now();
   const { lastInsertRowid: id } = db.prepare(`
@@ -223,9 +279,9 @@ app.post('/api/bugs', auth, testerOnly, (req, res) => {
 });
 
 app.put('/api/bugs/:id', auth, testerOnly, (req, res) => {
-  const old = db.prepare('SELECT * FROM bugs WHERE id = ?').get(Number(req.params.id));
-  if (!old) return res.status(404).json({ error: 'Bug not found.' });
-  const { bug, error } = readBugBody(req.body);
+  const old = memberBug(req, res);
+  if (!old) return;
+  const { bug, error } = readBugBody(req.body, old.project_id);
   if (error) return res.status(400).json({ error });
   const t = now();
   db.prepare(`
@@ -242,8 +298,8 @@ app.put('/api/bugs/:id', auth, testerOnly, (req, res) => {
 
 // Quick status change (the main thing developers and testers do)
 app.patch('/api/bugs/:id/status', auth, (req, res) => {
-  const old = db.prepare('SELECT * FROM bugs WHERE id = ?').get(Number(req.params.id));
-  if (!old) return res.status(404).json({ error: 'Bug not found.' });
+  const old = memberBug(req, res);
+  if (!old) return;
   const status = req.body.status, comment = str(req.body.comment, 1000);
   if (!STATUSES.includes(status)) return res.status(400).json({ error: 'Unknown status.' });
   if (status === old.status && !comment) return res.status(400).json({ error: 'Pick a new status or add a comment.' });
@@ -258,8 +314,8 @@ app.patch('/api/bugs/:id/status', auth, (req, res) => {
 
 // Notes can be edited by anyone (developers add root cause, build numbers, etc.)
 app.patch('/api/bugs/:id/notes', auth, (req, res) => {
-  const old = db.prepare('SELECT * FROM bugs WHERE id = ?').get(Number(req.params.id));
-  if (!old) return res.status(404).json({ error: 'Bug not found.' });
+  const old = memberBug(req, res);
+  if (!old) return;
   const notes = str(req.body.notes);
   if (notes === old.notes) return res.status(400).json({ error: 'Notes are unchanged.' });
   const t = now();
@@ -270,8 +326,8 @@ app.patch('/api/bugs/:id/notes', auth, (req, res) => {
 });
 
 app.delete('/api/bugs/:id', auth, (req, res) => {
-  const old = db.prepare('SELECT * FROM bugs WHERE id = ?').get(Number(req.params.id));
-  if (!old) return res.status(404).json({ error: 'Bug not found.' });
+  const old = memberBug(req, res);
+  if (!old) return;
   if (old.reporter_id !== req.user.id) return res.status(403).json({ error: 'Only the person who reported this bug can delete it.' });
   db.prepare('DELETE FROM bugs WHERE id = ?').run(old.id);
   if (old.screenshot) removeUpload(old.screenshot);
@@ -280,8 +336,8 @@ app.delete('/api/bugs/:id', auth, (req, res) => {
 
 // CSV export (opens in Excel)
 app.get('/api/export.csv', auth, (req, res) => {
-  const project = projectFrom(req.query.project);
-  if (!project) return res.status(400).json({ error: 'Pick a project first.' });
+  const project = memberProject(req, res, req.query.project);
+  if (!project) return;
   const cols = [['ID', b => bugKey(b.id)], ['Panel', 'panel'], ['Module', 'module'], ['Description', 'description'], ['Steps to Reproduce', 'steps'],
     ['Expected Result', 'expected'], ['Actual Result', 'actual'], ['Status', 'status'], ['Assignee', 'assignee_name'],
     ['Priority', 'priority'], ['Date Reported', 'date_reported'], ['Screenshot/Link', 'link'], ['Notes', 'notes'],
@@ -299,8 +355,8 @@ app.get('/api/export.csv', auth, (req, res) => {
 // Import a spreadsheet (CSV text in the body)
 app.post('/api/import', auth, testerOnly, express.text({ type: '*/*', limit: '5mb' }), (req, res) => {
   try {
-    const project = projectFrom(req.query.project);
-    if (!project) return res.status(400).json({ error: 'Pick a project first.' });
+    const project = memberProject(req, res, req.query.project);
+    if (!project) return;
     const result = importCsv(String(req.body || ''), project.id, req.user.id);
     res.json(result);
   } catch (e) {

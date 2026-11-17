@@ -82,9 +82,41 @@ if (!bugCols.includes('project_id')) {
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_bugs_project ON bugs(project_id)');
 
+// Who can see each project. A project is hidden from everyone who is not a member.
+const hadMembers = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_members'").get();
+db.exec(`
+  CREATE TABLE IF NOT EXISTS project_members (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    added_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_members_user ON project_members(user_id);
+`);
+if (!hadMembers) {
+  // One-time setup for existing projects: testers, the creator and current assignees keep access.
+  db.exec(`
+    INSERT OR IGNORE INTO project_members (project_id, user_id)
+      SELECT p.id, u.id FROM projects p, users u WHERE u.role = 'Tester';
+    INSERT OR IGNORE INTO project_members (project_id, user_id)
+      SELECT id, created_by FROM projects WHERE created_by IS NOT NULL;
+    INSERT OR IGNORE INTO project_members (project_id, user_id)
+      SELECT DISTINCT project_id, assignee_id FROM bugs WHERE assignee_id IS NOT NULL AND project_id IS NOT NULL;
+  `);
+}
+
+export const isMember = (projectId, userId) =>
+  !!db.prepare('SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?').get(projectId, userId);
+export const addMember = (projectId, userId, addedBy = null) =>
+  db.prepare('INSERT OR IGNORE INTO project_members (project_id, user_id, added_by) VALUES (?, ?, ?)').run(projectId, userId, addedBy);
+
 /** Find a project by name, creating it if needed. */
 export function projectByName(name, userId = null) {
   const p = db.prepare('SELECT id FROM projects WHERE name = ?').get(name);
   if (p) return p.id;
-  return db.prepare('INSERT INTO projects (name, created_by) VALUES (?, ?)').run(name, userId).lastInsertRowid;
+  const id = db.prepare('INSERT INTO projects (name, created_by) VALUES (?, ?)').run(name, userId).lastInsertRowid;
+  // Created outside the app (command-line import): give every tester access
+  db.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id) SELECT ?, id FROM users WHERE role = 'Tester'").run(id);
+  return id;
 }

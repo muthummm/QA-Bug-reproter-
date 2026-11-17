@@ -48,7 +48,8 @@ function Toast({ toast }) {
   );
 }
 
-function Modal({ open, onClose, className, children, labelledBy }) {
+// canClose(): return false to keep the dialog open (e.g. to protect unsaved typing)
+function Modal({ open, onClose, className, children, labelledBy, canClose = () => true }) {
   const ref = useRef();
   useEffect(() => {
     const d = ref.current;
@@ -57,7 +58,8 @@ function Modal({ open, onClose, className, children, labelledBy }) {
   }, [open]);
   return (
     <dialog ref={ref} className={className} aria-labelledby={labelledBy}
-      onClose={onClose} onClick={e => { if (e.target === ref.current) onClose(); }}>
+      onCancel={e => { if (!canClose()) e.preventDefault(); }}
+      onClose={onClose} onClick={e => { if (e.target === ref.current && canClose()) onClose(); }}>
       {open && children}
     </dialog>
   );
@@ -69,6 +71,7 @@ function AuthScreen({ onAuthed }) {
   const [f, setF] = useState({ name: '', username: '', password: '', role: 'Tester' });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showPw, setShowPw] = useState(false);
   const set = k => e => setF({ ...f, [k]: e.target.value });
 
   async function submit(e) {
@@ -102,8 +105,14 @@ function AuthScreen({ onAuthed }) {
           </>
         )}
         <label className="f">Username<input id="a-user" value={f.username} onChange={set('username')} autoComplete="username" required /></label>
-        <label className="f">Password<input id="a-pass" type="password" value={f.password} onChange={set('password')}
-          autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>
+        <label className="f">Password
+          <span className="pw">
+            <input id="a-pass" type={showPw ? 'text' : 'password'} value={f.password} onChange={set('password')}
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 6 : undefined} required />
+            <button type="button" className="pw-toggle" onClick={() => setShowPw(s => !s)} aria-pressed={showPw}>{showPw ? 'Hide' : 'Show'}</button>
+          </span>
+          {mode === 'register' && <span className="hint">At least 6 characters</span>}
+        </label>
         {err && <p className="err">{err}</p>}
         <button className="btn primary" disabled={busy}>{mode === 'login' ? 'Sign in' : 'Create account'}</button>
         <button type="button" className="link-btn" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(''); }}>
@@ -120,11 +129,14 @@ const EMPTY = {
   assignee_id: '', date_reported: '', link: '', screenshot: '', notes: '',
 };
 
-function BugForm({ bug, project, users, modules, panels, onSaved, onCancel }) {
-  const [f, setF] = useState(() => bug ? { ...EMPTY, ...bug, assignee_id: bug.assignee_id ?? '' } : { ...EMPTY, date_reported: today() });
+function BugForm({ bug, project, users, modules, panels, onSaved, onCancel, dirtyRef }) {
+  const [initial] = useState(() => bug ? { ...EMPTY, ...bug, assignee_id: bug.assignee_id ?? '' } : { ...EMPTY, date_reported: today() });
+  const [f, setF] = useState(initial);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const set = k => e => setF(prev => ({ ...prev, [k]: e.target.value }));
+  if (dirtyRef) dirtyRef.current = Object.keys(EMPTY).some(k => String(f[k] ?? '') !== String(initial[k] ?? ''));
 
   async function uploadFile(file) {
     if (!file || !file.type.startsWith('image/')) return;
@@ -157,7 +169,9 @@ function BugForm({ bug, project, users, modules, panels, onSaved, onCancel }) {
   const others = users.filter(u => u.role !== 'Developer');
 
   return (
-    <form onSubmit={submit} noValidate onPaste={e => { const file = e.clipboardData?.files?.[0]; if (file) { e.preventDefault(); uploadFile(file); } }}>
+    <form onSubmit={submit} noValidate
+      onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.currentTarget.requestSubmit(); } }}
+      onPaste={e => { const file = e.clipboardData?.files?.[0]; if (file) { e.preventDefault(); uploadFile(file); } }}>
       <div className="dlg-head"><h2 id="form-title">{bug ? `Edit ${bug.key}` : 'Report a bug'}</h2>
         <button type="button" className="x" onClick={onCancel} aria-label="Close">×</button></div>
       <div className="dlg-body">
@@ -197,13 +211,20 @@ function BugForm({ bug, project, users, modules, panels, onSaved, onCancel }) {
           {f.screenshot
             ? <div className="thumb"><img src={f.screenshot} alt="Screenshot" />
                 <button type="button" onClick={() => setF(prev => ({ ...prev, screenshot: '' }))}>Remove</button></div>
-            : <div className="hint-row"><input id="i-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={e => uploadFile(e.target.files[0])} />
-                <span className="hint">or paste an image with Ctrl+V. Max 5 MB.</span></div>}
+            : <label className={'drop' + (dragging ? ' over' : '')}
+                onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
+                onDrop={e => { e.preventDefault(); setDragging(false); uploadFile(e.dataTransfer.files[0]); }}>
+                <input id="i-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="sr-only" onChange={e => uploadFile(e.target.files[0])} />
+                <span className="drop-icon" aria-hidden="true">⬆</span>
+                <span><b>Choose an image</b>, drag it here, or paste it with Ctrl+V</span>
+                <span className="hint">PNG, JPG, GIF or WebP, up to 5 MB</span>
+              </label>}
         </div>
         <label className="f">Notes<textarea id="i-notes" rows={2} value={f.notes} onChange={set('notes')} /></label>
       </div>
       <div className="dlg-foot">
         <span className="err">{err}</span>
+        <span className="hint kbd-hint">Ctrl+Enter to save</span>
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>
         <button className="btn primary" disabled={busy}>{bug ? 'Save changes' : 'Save bug'}</button>
       </div>
@@ -212,6 +233,19 @@ function BugForm({ bug, project, users, modules, panels, onSaved, onCancel }) {
 }
 
 // ---------- bug detail ----------
+// The usual next moves for each status: [new status, button label, who does it]
+const NEXT_STEPS = {
+  'Open': [['In Progress', 'Start work', 'dev'], ['Not a Bug', 'Not a bug', 'dev']],
+  'Reopened': [['In Progress', 'Start work', 'dev'], ['Not a Bug', 'Not a bug', 'dev']],
+  'In Progress': [['Fixed', 'Mark fixed', 'dev'], ['Ready for Retest', 'Ready for retest', 'dev']],
+  'Fixed': [['Ready for Retest', 'Ready for retest', 'dev'], ['Closed', 'Verified, close it', 'tester'], ['Reopened', 'Still broken, reopen', 'tester']],
+  'Ready for Retest': [['Closed', 'Verified, close it', 'tester'], ['Reopened', 'Still broken, reopen', 'tester']],
+  'Closed': [['Reopened', 'Reopen', 'tester']],
+  'Not a Bug': [['Reopened', 'Reopen', 'tester']],
+};
+const waitingText = (status, tester) => tester
+  ? (['Open', 'Reopened', 'In Progress'].includes(status) ? 'Waiting for the developer to fix this.' : 'No suggested step.')
+  : (['Fixed', 'Ready for Retest'].includes(status) ? 'Waiting for the tester to retest and close it.' : 'This bug is done. A tester can reopen it if needed.');
 function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -230,10 +264,11 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
   }, [id]);
   useEffect(() => { load(); }, [load]);
 
-  async function updateStatus() {
+  async function updateStatus(target = status) {
+    if (target === data.bug.status && !comment.trim()) { toast('Pick a different status or type a comment first.', 'error'); return; }
     setBusy(true);
     try {
-      const { bug } = await api(`/bugs/${id}/status`, { method: 'PATCH', body: { status, comment } });
+      const { bug } = await api(`/bugs/${id}/status`, { method: 'PATCH', body: { status: target, comment } });
       setComment('');
       toast(bug.status !== data.bug.status
         ? `Status updated: ${bug.key} is now ${bug.status}${comment.trim() ? ' (comment added)' : ''}`
@@ -259,7 +294,8 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
   if (err) return <div className="dlg-body"><p className="err">{err}</p></div>;
   if (!data) return <div className="dlg-body"><p className="muted">Loading…</p></div>;
   const b = data.bug;
-  const Sec = ({ title, children }) => (
+  const actions = (NEXT_STEPS[b.status] || []).filter(([, , who]) => who === (tester ? 'tester' : 'dev'));
+  const Sec =({ title, children }) => (
     <div className="sec"><h3>{title}</h3>{children ? <p>{children}</p> : <p className="none">Not provided</p>}</div>
   );
 
@@ -269,14 +305,30 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
         <button className="x" onClick={onClose} aria-label="Close">×</button></div>
       <div className="dlg-body">
         <div className="statusbox">
-          <strong>Status</strong>
-          <select id="v-status" value={status} onChange={e => setStatus(e.target.value)} aria-label="New status">
-            {STATUSES.filter(s => tester || DEV_STATUSES.includes(s) || s === b.status).map(s =>
-              <option key={s} disabled={!tester && !DEV_STATUSES.includes(s)}>{s}</option>)}
-          </select>
-          <input id="v-comment" value={comment} onChange={e => setComment(e.target.value)} placeholder="Comment (optional), e.g. fixed in build 1.4.2" />
-          <button className="btn primary" disabled={busy} onClick={updateStatus}>Update</button>
-          {!tester && <span className="hint full">Closing or reopening is done by the tester after they retest your fix.</span>}
+          <div className="sb-line"><strong>Next step</strong><StatusPill status={b.status} /></div>
+          {actions.length > 0
+            ? <div className="quick">{actions.map(([to, label], i) => (
+                <button key={to} className={'btn' + (i === 0 ? ' primary' : '')} disabled={busy} onClick={() => updateStatus(to)}>
+                  {label}<span className="to">→ {to}</span></button>))}</div>
+            : <p className="hint">{waitingText(b.status, tester)}</p>}
+          <div className="sb-line grow">
+            <input id="v-comment" value={comment} onChange={e => setComment(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && comment.trim()) updateStatus(b.status); }}
+              placeholder="Comment, e.g. fixed in build 1.4.2" aria-label="Comment" />
+            <button className="btn" disabled={busy || !comment.trim()} onClick={() => updateStatus(b.status)}>Add comment</button>
+          </div>
+          {actions.length > 0 && <span className="hint">A typed comment is saved together with the next step you click.</span>}
+          <details className="other">
+            <summary>Set another status</summary>
+            <div className="sb-line">
+              <select id="v-status" value={status} onChange={e => setStatus(e.target.value)} aria-label="New status">
+                {STATUSES.filter(s => tester || DEV_STATUSES.includes(s) || s === b.status).map(s =>
+                  <option key={s} disabled={!tester && !DEV_STATUSES.includes(s)}>{s}</option>)}
+              </select>
+              <button className="btn" disabled={busy || status === b.status} onClick={() => updateStatus()}>Set status</button>
+            </div>
+            {!tester && <span className="hint">Closing or reopening is done by the tester after they retest your fix.</span>}
+          </details>
         </div>
 
         <dl className="meta">
@@ -340,6 +392,74 @@ function BugDetail({ id, me, onClose, onEdit, onChanged, toast }) {
   );
 }
 
+// ---------- team (project members) ----------
+function TeamPanel({ project, me, members, onChanged, onClose, toast }) {
+  const tester = isTester(me);
+  const [everyone, setEveryone] = useState([]);
+  const [pick, setPick] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
+
+  useEffect(() => { if (tester) api('/users').then(setEveryone).catch(() => {}); }, [tester]);
+  const memberIds = new Set(members.map(m => m.id));
+  const candidates = everyone.filter(u => !memberIds.has(u.id));
+
+  async function add() {
+    if (!pick) return;
+    setBusy(true);
+    try {
+      const r = await api(`/projects/${project.id}/members`, { method: 'POST', body: { user_id: Number(pick) } });
+      toast(`${r.added.name} added to ${project.name}. They can see this project now.`);
+      setPick(''); onChanged();
+    } catch (e) { toast(e.message, 'error'); }
+    setBusy(false);
+  }
+  async function remove(m) {
+    setBusy(true);
+    try {
+      const r = await api(`/projects/${project.id}/members/${m.id}`, { method: 'DELETE' });
+      toast(`${m.name} removed from ${project.name}` + (r.unassigned ? `. ${r.unassigned} bug${r.unassigned === 1 ? '' : 's'} assigned to them are now unassigned.` : '.'));
+      setConfirmId(null); onChanged();
+    } catch (e) { toast(e.message, 'error'); }
+    setBusy(false);
+  }
+
+  return (
+    <>
+      <div className="dlg-head"><h2 id="team-title">Team · {project.name}</h2>
+        <button className="x" onClick={onClose} aria-label="Close">×</button></div>
+      <div className="dlg-body">
+        <p className="hint">Only the people listed here can see this project and its bugs.{tester ? ' Add a developer to give them access.' : ''}</p>
+        {tester && (
+          <div className="team-add">
+            <select id="t-pick" value={pick} onChange={e => setPick(e.target.value)} aria-label="Person to add">
+              <option value="">{candidates.length ? 'Choose a person to add…' : 'Everyone with an account is already here'}</option>
+              {['Developer', 'Tester'].map(role => {
+                const list = candidates.filter(u => u.role === role);
+                return list.length > 0 && <optgroup key={role} label={role + 's'}>{list.map(u => <option key={u.id} value={u.id}>{u.name} ({u.username})</option>)}</optgroup>;
+              })}
+            </select>
+            <button className="btn primary" disabled={!pick || busy} onClick={add}>Add to project</button>
+          </div>
+        )}
+        {tester && <p className="hint">Not in the list? They need to create an account first (choose "Create an account" on the sign-in page).</p>}
+        <ul className="team">
+          {members.map(m => (
+            <li key={m.id}>
+              <span className="t-who"><b>{m.name}</b>{m.id === me.id && <span className="you"> (you)</span>}
+                <small>{m.username} · {m.role}{m.pending ? ' · hasn’t set a password yet' : ''}{m.added_by_name ? ` · added by ${m.added_by_name}` : ''}</small></span>
+              {tester && (confirmId === m.id
+                ? <span className="t-confirm">Remove? <button className="btn danger" disabled={busy} onClick={() => remove(m)}>Yes, remove</button>
+                    <button className="btn" onClick={() => setConfirmId(null)}>Keep</button></span>
+                : <button className="btn ghost danger" onClick={() => setConfirmId(m.id)}>Remove</button>)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </>
+  );
+}
+
 // ---------- project picker ----------
 function ProjectsScreen({ me, onOpen, onLogout, toast }) {
   const [projects, setProjects] = useState(null);
@@ -356,8 +476,9 @@ function ProjectsScreen({ me, onOpen, onLogout, toast }) {
     setErr('');
     try {
       const { project } = await api('/projects', { method: 'POST', body: { name, description: desc } });
-      toast(`Project "${project.name}" created successfully`);
-      onOpen(project.id);
+      toast(`Project "${project.name}" created successfully. Click it to open.`);
+      setAdding(false); setName(''); setDesc('');
+      load();
     } catch (e2) { setErr(e2.message); }
   }
 
@@ -366,25 +487,30 @@ function ProjectsScreen({ me, onOpen, onLogout, toast }) {
       <header className="top">
         <div className="wrap">
           <div className="brand"><h1>Bug Log</h1><span className="sub">{me.name} · {me.role}</span></div>
-          <button className="btn ghost" onClick={onLogout}>Sign out</button>
+          <button className="btn ghost signout" onClick={onLogout}>Sign out</button>
         </div>
       </header>
       <main className="wrap projects">
         <div className="projects-head">
           <h2>Select a project</h2>
-          {!adding && <button className="btn primary" onClick={() => setAdding(true)}>+ New project</button>}
+          {!adding && isTester(me) && <button className="btn primary" onClick={() => setAdding(true)}>+ New project</button>}
         </div>
         {adding && (
           <form className="new-project" onSubmit={create}>
             <label className="f">Project name<input id="p-name" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. ROA - Mentorship Web" autoFocus /></label>
             <label className="f">Description<input id="p-desc" value={desc} onChange={e => setDesc(e.target.value)} placeholder="Optional" /></label>
-            <div className="row-btns"><button className="btn primary" disabled={!name.trim()}>Create and open</button>
+            <div className="row-btns"><button className="btn primary" disabled={!name.trim()}>Create</button>
               <button type="button" className="btn" onClick={() => { setAdding(false); setErr(''); }}>Cancel</button></div>
           </form>
         )}
         {err && <div className="notice">{err}</div>}
         {projects && projects.length === 0 && !adding && (
-          <div className="empty list"><h2>No projects yet</h2><p>Create a project, then report bugs inside it.</p></div>
+          <div className="empty list">
+            {isTester(me)
+              ? <><h2>No projects yet</h2><p>Create a project, then add your developers to it from Team.</p></>
+              : <><h2>You haven't been added to a project yet</h2><p>Ask your tester to add <b>{me.username}</b> to a project. It will show up here right after.</p>
+                  <button className="btn" onClick={load}>Check again</button></>}
+          </div>
         )}
         <div className="project-grid">
           {(projects || []).map(p => (
@@ -395,7 +521,9 @@ function ProjectsScreen({ me, onOpen, onLogout, toast }) {
                 <span><b>{p.total}</b> bugs</span>
                 <span style={{ '--c': 'var(--s-open)' }}><span className="dot" /> <b>{p.active || 0}</b> open</span>
                 <span style={{ '--c': 'var(--s-retest)' }}><span className="dot" /> <b>{p.to_verify || 0}</b> to verify</span>
+                {!isTester(me) && <span style={{ '--c': 'var(--accent)' }}><span className="dot" /> <b>{p.mine || 0}</b> assigned to you</span>}
               </span>
+              <span className="p-date">{p.members} member{p.members === 1 ? '' : 's'}</span>
               <span className="p-date">{p.last_activity ? 'Updated ' + fmtTime(p.last_activity) : 'No bugs yet'}</span>
             </button>
           ))}
@@ -457,7 +585,11 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
   const [viewId, setViewId] = useState(null);
   const [form, setForm] = useState(null); // null | {bug?}
   const fileRef = useRef();
+  const formDirty = useRef(false);
+  const canCloseForm = () => !formDirty.current || window.confirm('Discard your changes? What you typed in this bug will be lost.');
   const me_ = me;
+  const backRef = useRef(onBack);
+  backRef.current = onBack;
 
   const loadBugs = useCallback(async () => {
     const qs = new URLSearchParams([['project', projectId], ...Object.entries(filters).filter(([, v]) => v)]).toString();
@@ -466,9 +598,13 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
       setProject(d.project); setPanels(d.panels);
       setBugs(d.bugs); setCounts(d.counts); setLoadErr(''); setLoaded(true);
     } catch (e) {
-      if (e.status === 401) onSignedOut(); else setLoadErr(e.message);
+      if (e.status === 401) onSignedOut();
+      else if (e.status === 404) { toast(e.message, 'error'); backRef.current(); } // removed from the project, or it never existed
+      else setLoadErr(e.message);
     }
-  }, [filters, projectId, onSignedOut]);
+  }, [filters, projectId, onSignedOut, toast]);
+  const [teamOpen, setTeamOpen] = useState(false);
+  const loadMembers = useCallback(() => api(`/projects/${projectId}/members`).then(setUsers).catch(() => {}), [projectId]);
 
   async function onImport(e) {
     const file = e.target.files[0];
@@ -493,12 +629,16 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
     return () => clearInterval(t);
   }, [loadBugs]);
 
-  useEffect(() => { api('/users').then(setUsers).catch(() => {}); }, [form, bugs.length]);
+  useEffect(() => { loadMembers(); }, [loadMembers, form, bugs.length]);
 
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const setFilter = k => e => setFilters(f => ({ ...f, [k]: e.target.value }));
   const modules = [...new Set(bugs.map(b => b.module))].sort();
   const logout = onLogout;
+  const filtered = ['status', 'priority', 'assignee', 'panel', 'q'].some(k => filters[k]);
+  const clearFilters = () => setFilters(f => ({ ...f, status: '', priority: '', assignee: '', panel: '', q: '' }));
+  const mine = filters.assignee === String(me.id);
+  useEffect(() => { document.title = project ? `${project.name} · Bug Log` : 'Bug Log'; }, [project]);
 
   return (
     <>
@@ -506,13 +646,16 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
         <div className="wrap">
           <button className="btn ghost back" onClick={onBack} aria-label="All projects">← Projects</button>
           <div className="brand"><h1>{project ? project.name : 'Loading…'}</h1><span className="sub">{me_.name} · {me_.role}</span></div>
-          {isTester(me) && <>
-            <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={onImport} />
-            <button className="btn" onClick={() => fileRef.current.click()}>Import CSV</button>
-          </>}
-          <button className="btn" onClick={() => project && downloadCsv(project).then(() => toast('CSV exported successfully'), e => toast(e.message, 'error'))}>Export CSV</button>
-          {isTester(me) && <button className="btn primary" onClick={() => setForm({})}>+ Report bug</button>}
-          <button className="btn ghost" onClick={logout}>Sign out</button>
+          <div className="actions">
+            <button className="btn" onClick={() => setTeamOpen(true)}>Team <span className="n">{users.length || ''}</span></button>
+            {isTester(me) && <>
+              <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={onImport} />
+              <button className="btn" onClick={() => fileRef.current.click()}>Import CSV</button>
+            </>}
+            <button className="btn" onClick={() => project && downloadCsv(project).then(() => toast('CSV exported successfully'), e => toast(e.message, 'error'))}>Export CSV</button>
+            {isTester(me) && <button className="btn primary" onClick={() => setForm({})}>+ Report bug</button>}
+            <button className="btn ghost signout" onClick={logout}>Sign out</button>
+          </div>
         </div>
       </header>
 
@@ -530,6 +673,8 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
 
         <div className="filters">
           <input id="q" type="search" placeholder="Search ID (BUG-012), module, description…" value={filters.q} onChange={setFilter('q')} aria-label="Search bugs" />
+          <button className="chip mine" aria-pressed={mine}
+            onClick={() => setFilters(f => ({ ...f, assignee: mine ? '' : String(me.id) }))}>Assigned to me</button>
           {panels.length > 0 && (
             <select id="f-panel" value={filters.panel} onChange={setFilter('panel')} aria-label="Panel">
               <option value="">All panels</option>{panels.map(p => <option key={p}>{p}</option>)}
@@ -546,6 +691,7 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
             <option value="new">Newest first</option><option value="old">Oldest first</option>
             <option value="priority">Priority</option><option value="updated">Recently updated</option>
           </select>
+          {filtered && <button className="btn ghost clear" onClick={clearFilters}>✕ Clear filters</button>}
         </div>
 
         {loadErr && <div className="notice">{loadErr}</div>}
@@ -558,7 +704,8 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
                 ? <><h2>No bugs in this project yet</h2><p>{isTester(me)
                     ? 'Click “+ Report bug” to log one, or “Import CSV” to bring in a spreadsheet.'
                     : 'Testers report bugs here. They will show up as soon as they are logged.'}</p></>
-                : <><h2>No bugs match these filters</h2><p>Clear the search or pick another status.</p></>}
+                : <><h2>No bugs match these filters</h2><p>{mine ? 'Nothing is assigned to you here right now.' : 'Try another status or search.'}</p>
+                    <button className="btn" onClick={clearFilters}>Clear filters</button></>}
             </div>
           )}
           {bugs.map(b => (
@@ -580,8 +727,14 @@ function BugPage({ me, projectId, onBack, onLogout, onSignedOut, toast }) {
           onEdit={bug => { setViewId(null); setForm({ bug }); }} />
       </Modal>
 
-      <Modal open={form != null} onClose={() => setForm(null)} className="form" labelledBy="form-title">
-        <BugForm bug={form?.bug} project={project} users={users} modules={modules} panels={panels} onCancel={() => setForm(null)}
+      <Modal open={teamOpen && !!project} onClose={() => setTeamOpen(false)} className="form team-dlg" labelledBy="team-title">
+        {project && <TeamPanel project={project} me={me} members={users} toast={toast} onClose={() => setTeamOpen(false)}
+          onChanged={() => { loadMembers(); loadBugs(); }} />}
+      </Modal>
+
+      <Modal open={form != null} onClose={() => setForm(null)} className="form" labelledBy="form-title" canClose={canCloseForm}>
+        <BugForm bug={form?.bug} project={project} users={users} modules={modules} panels={panels} dirtyRef={formDirty}
+          onCancel={() => { if (canCloseForm()) setForm(null); }}
           onSaved={(bug, created) => { toast(created ? `${bug.key} reported successfully` : `${bug.key} updated successfully`); setForm(null); loadBugs(); setViewId(bug.id); }} />
       </Modal>
     </>

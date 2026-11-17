@@ -1,5 +1,5 @@
 // Imports a bug spreadsheet (CSV exported from Excel / Google Sheets) into the database.
-import { db } from './db.js';
+import { db, addMember } from './db.js';
 
 export const STATUSES = ['Open', 'In Progress', 'Fixed', 'Ready for Retest', 'Reopened', 'Closed', 'Not a Bug'];
 export const PRIORITIES = ['Critical', 'High', 'Medium', 'Low'];
@@ -151,6 +151,7 @@ export function importCsv(text, projectId, reporterId = null) {
 
       const assignee = get('assignee').trim();
       const assigneeId = assignee ? findOrCreateUser(assignee, result.createdUsers) : null;
+      if (assigneeId) addMember(projectId, assigneeId, reporterId); // assignees need to see the project
       const t = new Date().toISOString();
       const id = insert.run(projectId, panel, mod, description, clean(get('steps')), clean(get('expected')), clean(get('actual')),
         status, assigneeId, priority, date, link, notesParts.filter(Boolean).join('\n'), reporterId, t, t).lastInsertRowid;
