@@ -235,8 +235,8 @@ function BugForm({ bug, project, users, modules, panels, onSaved, onCancel, dirt
 // ---------- bug detail ----------
 // The usual next moves for each status: [new status, button label, who does it]
 const NEXT_STEPS = {
-  'Open': [['In Progress', 'Start work', 'dev'], ['Not a Bug', 'Not a bug', 'dev']],
-  'Reopened': [['In Progress', 'Start work', 'dev'], ['Not a Bug', 'Not a bug', 'dev']],
+  'Open': [['In Progress', 'Start work', 'dev'], ['Ready for Retest', 'Ready for retest', 'dev']],
+  'Reopened': [['In Progress', 'Start work', 'dev'], ['Ready for Retest', 'Ready for retest', 'dev']],
   'In Progress': [['Fixed', 'Mark fixed', 'dev'], ['Ready for Retest', 'Ready for retest', 'dev']],
   'Fixed': [['Ready for Retest', 'Ready for retest', 'dev'], ['Closed', 'Verified, close it', 'tester'], ['Reopened', 'Still broken, reopen', 'tester']],
   'Ready for Retest': [['Closed', 'Verified, close it', 'tester'], ['Reopened', 'Still broken, reopen', 'tester']],
